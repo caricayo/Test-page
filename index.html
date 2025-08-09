@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BTC Explainer — Reliable Update (with fallback)</title>
+<title>BTC Explainer — Live (CoinCap)</title>
 <style>
   :root{--bg:#0f1115;--panel:#121722;--card:#171a21;--ink:#e9eef7;--muted:#a9b4c2;--accent:#7aa2ff;--good:#a2ffd3;--bad:#ff8a8a}
   *{box-sizing:border-box}
@@ -31,8 +31,8 @@
 <div class="layout">
   <header>
     <div>
-      <h1>BTC Explainer — Reliable Update</h1>
-      <div class="sub">Tries CoinGecko first; if blocked, falls back to Binance. Saves a snapshot each time.</div>
+      <h1>BTC Explainer — Live (CoinCap)</h1>
+      <div class="sub">Uses CoinCap public candles (no key). Saves a snapshot each time you update.</div>
     </div>
     <div class="controls">
       <button id="update">Update now</button>
@@ -52,7 +52,7 @@
         </div>
       </div>
       <canvas id="chart" width="800" height="240" aria-label="BTC last 60 minutes chart"></canvas>
-      <div class="small">Tip: If an in-app browser blocks APIs, open this page via your GitHub Pages URL directly in Safari.</div>
+      <div class="small">If a fetch ever fails, try again — CoinCap rate-limits briefly during heavy traffic.</div>
     </section>
 
     <section class="card">
@@ -71,11 +71,12 @@
 </div>
 
 <script>
-const CG="https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=minutely";
-const BINANCE="https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=120";
-const fmtUSD=x=>x==null?"—":"$"+x.toLocaleString(undefined,{maximumFractionDigits:2});
+const COINCAP = (startMs, endMs) =>
+  `https://api.coincap.io/v2/candles?exchange=binance&interval=m1&baseId=bitcoin&quoteId=tether&start=${startMs}&end=${endMs}`;
 
-function drawChart(ctx,prices){
+const fmtUSD = x => x==null ? "—" : "$" + x.toLocaleString(undefined,{maximumFractionDigits:2});
+
+function drawChart(ctx, prices){
   ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
   const w=ctx.canvas.width,h=ctx.canvas.height,ys=prices.map(p=>p[1]);
   const min=Math.min(...ys),max=Math.max(...ys),pad=(max-min)*0.1||1,lo=min-pad,hi=max+pad;
@@ -141,15 +142,18 @@ function renderArchive(){
   }).join("");
 }
 
-async function fetchCoingecko(){
-  const res=await fetch(CG,{cache:'no-store'}); if(!res.ok) throw new Error("CoinGecko HTTP "+res.status);
-  const data=await res.json(); return {source:"CoinGecko",prices:data.prices.slice(-120),volumes:data.total_volumes.slice(-120)};
-}
-async function fetchBinance(){
-  const res=await fetch(BINANCE,{cache:'no-store'}); if(!res.ok) throw new Error("Binance HTTP "+res.status);
-  const rows=await res.json();
-  const prices=rows.map(r=>[r[0],parseFloat(r[4])]); const volumes=rows.map(r=>[r[0],parseFloat(r[5])]);
-  return {source:"Binance (USDT≈USD)",prices,volumes};
+async function fetchCoinCap(){
+  // last 120 minutes
+  const end = Date.now();
+  const start = end - 120*60*1000;
+  const url = COINCAP(start, end);
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error("CoinCap HTTP "+res.status);
+  const data = await res.json(); // [{period, open, high, low, close, volume}, ...]
+  // map to our format
+  const prices = data.data.map(d => [d.period, Number(d.close)]);
+  const volumes = data.data.map(d => [d.period, Number(d.volume)]);
+  return {source:"CoinCap (Binance BTC/USDT)", prices, volumes};
 }
 
 async function updateNow(){
@@ -157,25 +161,26 @@ async function updateNow(){
   const p1=document.getElementById('p1m'), p15=document.getElementById('p15m'), p60=document.getElementById('p60m');
   const ctx=document.getElementById('chart').getContext('2d'); const summary=document.getElementById('summary');
   const status=document.getElementById('status');
-  priceEl.textContent="Loading…"; status.textContent="Status: contacting CoinGecko…";
-  let payload,src;
-  try{payload=await fetchCoingecko(); src=payload.source}
-  catch(err1){status.textContent="Status: CoinGecko failed ("+err1.message+"). Trying Binance…";
-    try{payload=await fetchBinance(); src=payload.source}
-    catch(err2){status.innerHTML=`Status: <span class="bad">Both sources failed.</span> (${err1.message}; ${err2.message})`; priceEl.textContent="—"; summary.innerHTML=`<span class="bad">Could not fetch live data.</span>`; return}}
-  const {prices,volumes}=payload;
-  drawChart(ctx,prices.slice(-60));
-  const a=analyze(prices,volumes);
-  priceEl.innerHTML=fmtUSD(a.last);
-  p1.textContent="1m: "+(a.c1>=0?"+":"")+a.c1.toFixed(2)+"%";
-  p15.textContent="15m: "+(a.c15>=0?"+":"")+a.c15.toFixed(2)+"%";
-  p60.textContent="60m: "+(a.c60>=0?"+":"")+a.c60.toFixed(2)+"%";
-  p1.style.color=a.c1>=0?"var(--good)":"var(--bad)";
-  p15.style.color=a.c15>=0?"var(--good)":"var(--bad)";
-  p60.style.color=a.c60>=0?"var(--good)":"var(--bad)";
-  const now=new Date(); timeEl.textContent="Last update: "+now.toLocaleTimeString();
-  summary.innerHTML=a.summary; status.textContent="Status: OK • Source: "+src;
-  saveArchive({time:now.toLocaleString(),last:a.last,c1:a.c1,c15:a.c15,summary:a.summary,source:src});
+  try{
+    status.textContent="Status: contacting CoinCap…";
+    const payload = await fetchCoinCap();
+    const {prices, volumes, source} = payload;
+    drawChart(ctx, prices.slice(-60));
+    const a = analyze(prices, volumes);
+    priceEl.innerHTML = fmtUSD(a.last);
+    p1.textContent = "1m: " + (a.c1>=0?"+":"") + a.c1.toFixed(2) + "%";
+    p15.textContent = "15m: " + (a.c15>=0?"+":"") + a.c15.toFixed(2) + "%";
+    p60.textContent = "60m: " + (a.c60>=0?"+":"") + a.c60.toFixed(2) + "%";
+    p1.style.color = a.c1>=0 ? "var(--good)" : "var(--bad)";
+    p15.style.color = a.c15>=0 ? "var(--good)" : "var(--bad)";
+    p60.style.color = a.c60>=0 ? "var(--good)" : "var(--bad)";
+    const now = new Date(); timeEl.textContent = "Last update: " + now.toLocaleTimeString();
+    summary.innerHTML = a.summary; status.textContent = "Status: OK • Source: " + source;
+    saveArchive({time: now.toLocaleString(), last:a.last, c1:a.c1, c15:a.c15, summary:a.summary, source});
+  }catch(err){
+    status.innerHTML = `Status: <span class="bad">${err.message}</span>`;
+    summary.innerHTML = `<span class="bad">Could not fetch live data.</span>`;
+  }
 }
 
 function demoData(){
@@ -196,6 +201,7 @@ document.getElementById('use-demo').addEventListener('click',()=>{
   saveArchive({time:new Date().toLocaleString(),last:a.last,c1:a.c1,c15:a.c15,summary:a.summary,source});
 });
 document.getElementById('clear-archive').addEventListener('click',()=>{localStorage.removeItem("btc_explainer_archive_v2");renderArchive()});
+function renderArchive(){ /* defined above */ } // keep linter happy
 renderArchive();
 </script>
 </body>
